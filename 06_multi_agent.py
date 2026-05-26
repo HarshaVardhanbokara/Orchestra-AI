@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from typing import Literal
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.prebuilt import create_react_agent
+from langchain_community.tools import DuckDuckGoSearchRun
 
 # 2. Define the Shared Memory (The Whiteboard)
 class AgentState(TypedDict):
@@ -61,10 +62,26 @@ async def supervisor_node(state: AgentState):
     print(f"[Supervisor] Routing task to -> {result.next.upper()}")
     return {"next": result.next}
 
+
 # 7. Create the Worker Nodes
 async def web_researcher_node(state: AgentState):
-    print("\n[Web Researcher] 🌐 Receiving task. Searching the internet...")
-    return {"messages": [BaseMessage(content="Web search complete.", type="ai")]}
+    print("\n[Web Researcher] 🌐 Booting up Web Search tools...")
+    
+    # 1. Initialize the live web search tool
+    search_tool = DuckDuckGoSearchRun()
+    
+    # 2. Create the specialized internet agent
+    # We pass it the search tool in a list
+    worker_agent = create_react_agent(llm, tools=[search_tool])
+    
+    print("[Web Researcher] 🔍 Executing internet search...")
+    # 3. Hand the conversation history to the agent
+    result = await worker_agent.ainvoke({"messages": state["messages"]})
+    
+    # 4. Extract the final answer and pass it back
+    final_answer = result["messages"][-1]
+    
+    return {"messages": [final_answer]}
 
 async def file_manager_node(state: AgentState):
     print("\n[File Manager] 📂 Booting up MCP Server connection...")
@@ -132,7 +149,7 @@ print("Graph Compiled Successfully!")
 async def main():
     print("\n--- TESTING ASYNC MULTI-AGENT ROUTING ---")
     
-    test_prompt = "Hey, can you read the README.md file in my current directory?"
+    test_prompt = "What is the current price of Bitcoin today, and what is the latest news about it?"
     print(f"User: {test_prompt}")
     
     test_message = HumanMessage(content=test_prompt)
