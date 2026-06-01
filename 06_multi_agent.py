@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 # 1. Load the API keys from the .env file FIRST
 load_dotenv()
 
+from langchain_experimental.tools import PythonREPLTool
 from typing import TypedDict, Annotated, Sequence
 import operator
 from langchain_core.messages import BaseMessage, HumanMessage
@@ -26,12 +27,12 @@ class AgentState(TypedDict):
 workflow = StateGraph(AgentState)
 
 # 3. Define the Team Members
-members = ["web_researcher", "file_manager"]
+members = ["web_researcher", "file_manager","data_analyst"]
 options = ["FINISH"] + members
 
 # 4. Force Structured Output (The Routing Logic)
 class Route(BaseModel):
-    next: Literal["web_researcher", "file_manager", "FINISH"] = Field(
+    next: Literal["web_researcher", "file_manager", "data_analyst", "FINISH"] = Field(
         description="The next worker to act, or FINISH if the task is complete."
     )
 
@@ -44,6 +45,7 @@ system_prompt = (
     "Given the user request, determine which worker needs to act next. "
     "The 'web_researcher' can search the internet for up-to-date information. "
     "The 'file_manager' can read local computer files using the Model Context Protocol. "
+    "The 'data_analyst' can write and execute Python code to analyze datasets, CSVs, and perform complex math. "
     "When the task is fully answered, or if no workers are needed, respond with FINISH."
 )
 
@@ -84,6 +86,7 @@ async def web_researcher_node(state: AgentState):
     return {"messages": [final_answer]}
 
 async def file_manager_node(state: AgentState):
+
     print("\n[File Manager] 📂 Booting up MCP Server connection...")
     
     # Dynamically get the project directory so MCP knows where to look
@@ -118,10 +121,45 @@ async def file_manager_node(state: AgentState):
     
     return {"messages": [final_answer]}
 
+async def data_analyst_node(state: AgentState):
+    print("\n[Data Analyst] Processing Mathematical Query/ data request...")
+
+    system_prompt = """You are an expert Autonomous Data Scientist and Financial Analyst.
+    Your primary tool is the PyhtonREPLTool. You write and execute Python to analyze data
+    
+    CRITICAL RULES FOR DATA ANALYSIS:
+    1. If the user provides a CSV file path, you MUST use the 'pandas' library to load and analyze it.
+    2. Always print the results of your analysis (e.g., 'print(df.describe())') so the terminal output is captured.
+    
+    CRITICAL RULES FOR VISUALIZATIONS:
+    1. Never use 'plt.show()'. it will crash server.
+    2. If you generate a chart (matplotlib, seaborn), you MUST save it to a in-memory buffer and encode it as a base64 string.
+    3. Print the base64 string clearly in the terminal output using this format:
+    <IMAGE_BASE64> yout_base64_string_here </IMAGE_BASE64>
+
+    CRITICAL RULES FOR ERRORS:
+    1. If your code fails, you will receive the error traceback in the tool output.
+    2. Do not apologize. Immediately write a corrected Python scriptand execute it again.
+    """
+
+    repl_tool = PythonREPLTool()
+
+    worker_agent = create_react_agent(
+        llm,
+        tools = [repl_tool],
+        prompt = system_prompt
+    )
+
+    print("[Data Analyst] 🔍 Executing task...")
+    result = await worker_agent.ainvoke({"messages":state["messages"]})
+    final_answer = result["messages"][-1]
+    return {"messages": [final_answer]}
+
 # 8. Build the Graph (Wiring the team together)
 workflow.add_node("supervisor", supervisor_node)
 workflow.add_node("web_researcher", web_researcher_node)
 workflow.add_node("file_manager", file_manager_node)
+workflow.add_node("data_analyst", data_analyst_node)
 
 # The conversation ALWAYS starts with the boss
 workflow.set_entry_point("supervisor")
@@ -133,6 +171,7 @@ workflow.add_conditional_edges(
     {
         "web_researcher": "web_researcher",
         "file_manager": "file_manager",
+        "data_analyst": "data_analyst",
         "FINISH": END
     }
 )
@@ -140,6 +179,7 @@ workflow.add_conditional_edges(
 # After a worker finishes, the graph ends
 workflow.add_edge("web_researcher", END)
 workflow.add_edge("file_manager", END)
+workflow.add_edge("data_analyst", END)
 
 # Compile the machine!
 graph = workflow.compile()
@@ -149,7 +189,7 @@ print("Graph Compiled Successfully!")
 async def main():
     print("\n--- TESTING ASYNC MULTI-AGENT ROUTING ---")
     
-    test_prompt = "What is the current price of Bitcoin today, and what is the latest news about it?"
+    test_prompt = input("Ask Multi-Agent System.")
     print(f"User: {test_prompt}")
     
     test_message = HumanMessage(content=test_prompt)
