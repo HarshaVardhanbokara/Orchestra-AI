@@ -1,10 +1,12 @@
 import os
 import asyncio
+import aiosqlite
 from dotenv import load_dotenv
 
 # 1. Load the API keys from the .env file FIRST
 load_dotenv()
 
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langchain_experimental.tools import PythonREPLTool
 from typing import TypedDict, Annotated, Sequence
 import operator
@@ -124,23 +126,20 @@ async def file_manager_node(state: AgentState):
 async def data_analyst_node(state: AgentState):
     print("\n[Data Analyst] Processing Mathematical Query/ data request...")
 
-    system_prompt = """You are an expert Autonomous Data Scientist and Financial Analyst.
-    Your primary tool is the PyhtonREPLTool. You write and execute Python to analyze data
+    system_prompt ="""You are an expert Autonomous Data Scientist and Financial Analyst.
+        Your primary tool is the PythonREPLTool. You write and execute Python code to analyze data.
     
-    CRITICAL RULES FOR DATA ANALYSIS:
-    1. If the user provides a CSV file path, you MUST use the 'pandas' library to load and analyze it.
-    2. Always print the results of your analysis (e.g., 'print(df.describe())') so the terminal output is captured.
+        CRITICAL RULES FOR DATA ANALYSIS:
+        1. If the user provides a CSV file path, you MUST use the `pandas` library to load and analyze it.
+        2. Always print the results of your analysis (e.g., `print(df.describe())`) so the terminal output is captured.
+        
+        CRITICAL RULES FOR ERRORS:
+        1. If your code fails, you will receive the error traceback in the tool output. 
+        2. Do not apologize. Immediately write a corrected Python script and execute it again.
     
-    CRITICAL RULES FOR VISUALIZATIONS:
-    1. Never use 'plt.show()'. it will crash server.
-    2. If you generate a chart (matplotlib, seaborn), you MUST save it to a in-memory buffer and encode it as a base64 string.
-    3. Print the base64 string clearly in the terminal output using this format:
-    <IMAGE_BASE64> yout_base64_string_here </IMAGE_BASE64>
-
-    CRITICAL RULES FOR ERRORS:
-    1. If your code fails, you will receive the error traceback in the tool output.
-    2. Do not apologize. Immediately write a corrected Python scriptand execute it again.
-    """
+        CRITICAL RULE FOR FINAL OUTPUT:
+        1. After you successfully run your Python code and get the answer, you MUST write a final, conversational text response to the user summarizing the exact numbers or findings. NEVER return an empty response.
+        """
 
     repl_tool = PythonREPLTool()
 
@@ -181,9 +180,12 @@ workflow.add_edge("web_researcher", END)
 workflow.add_edge("file_manager", END)
 workflow.add_edge("data_analyst", END)
 
-# Compile the machine!
-graph = workflow.compile()
-print("Graph Compiled Successfully!")
+# # Create a physical SQLite database file in folder
+# conn = sqlite3.connect("cfo_memory.db",check_same_thread=False)
+# memory = SqliteSaver(conn)
+
+# #Compile the graph WITH the memory checkpointer attached
+# graph = workflow.compile(checkpointer=memory)
 
 # 9. Test the Asynchronous Routing System
 async def main():
@@ -193,9 +195,16 @@ async def main():
     print(f"User: {test_prompt}")
     
     test_message = HumanMessage(content=test_prompt)
+
+    thread_config = {"configurable": {"thread_id": "audit_session_0"}}
     
-    # Execute the graph
-    result = await graph.ainvoke({"messages": [test_message]})
+    # Async Database connection
+    async with AsyncSqliteSaver.from_conn_string("cfo_memory.db") as memory:
+        graph = workflow.compile(checkpointer=memory)
+
+        print(f"User: {test_prompt}")
+        # Execute the graph
+        result = await graph.ainvoke({"messages": [test_message]},config=thread_config)
     
     # Print the final output from the worker
     print("\n[Final Output]:")
@@ -204,4 +213,5 @@ async def main():
     print("\n[System] Graph execution finished cleanly.")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    while True:
+        asyncio.run(main())
