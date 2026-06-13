@@ -7,8 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from langchain_experimental.tools import PythonREPLTool
-from typing import TypedDict, Annotated, Sequence
+from typing import TypedDict, Annotated, Sequence, List
 import operator
 from langchain_core.messages import BaseMessage, HumanMessage
 from langgraph.graph import StateGraph, END
@@ -19,6 +18,11 @@ from typing import Literal
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.prebuilt import create_react_agent
 from langchain_community.tools import DuckDuckGoSearchRun
+
+# --- NEW IMPORTS FOR STRICT PYDANTIC TOOL ---
+from langchain_core.tools import tool
+from langchain_experimental.utilities import PythonREPL
+# --------------------------------------------
 
 # 2. Define the Shared Memory (The Whiteboard)
 class AgentState(TypedDict):
@@ -42,14 +46,19 @@ class Route(BaseModel):
 llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
 
 # 5. The Supervisor's System Prompt
-system_prompt = (
-    "You are a strict technical supervisor managing a conversation between these workers: {members}. "
-    "Given the user request, determine which worker needs to act next. "
-    "The 'web_researcher' can search the internet for up-to-date information. "
-    "The 'file_manager' can read local computer files using the Model Context Protocol. "
-    "The 'data_analyst' can write and execute Python code to analyze datasets, CSVs, and perform complex math. "
-    "When the task is fully answered, or if no workers are needed, respond with FINISH."
-)
+system_prompt ="""You are an expert Autonomous Data Scientist and Financial Analyst.
+        Your primary tool is 'python_executor'. 
+    
+        CRITICAL RULES FOR DATA ANALYSIS:
+        1. If the user provides a CSV file path, you MUST use `pandas` to load it.
+        2. Always print the results (e.g., `print(df['Revenue'].sum())`) so the terminal captures it.
+        3. Provide your code as a list of strings (one string per line of code).
+        4. ABSOLUTE RULE: You MUST use SINGLE QUOTES ('') for all strings inside your Python code. NEVER use double quotes (").
+        5. ABSOLUTE RULE: DO NOT ATTEMPT TO PLOT OR VISUALIZE DATA (No matplotlib, no seaborn). You are running in a headless environment. You must summarize the data purely using text and math calculations.
+        
+        CRITICAL RULE FOR FINAL OUTPUT:
+        After your tool successfully runs, write a text response summarizing the exact numbers.
+        """
 
 prompt = ChatPromptTemplate.from_messages([
     ("system", system_prompt),
@@ -70,82 +79,79 @@ async def supervisor_node(state: AgentState):
 # 7. Create the Worker Nodes
 async def web_researcher_node(state: AgentState):
     print("\n[Web Researcher] 🌐 Booting up Web Search tools...")
-    
-    # 1. Initialize the live web search tool
     search_tool = DuckDuckGoSearchRun()
-    
-    # 2. Create the specialized internet agent
-    # We pass it the search tool in a list
     worker_agent = create_react_agent(llm, tools=[search_tool])
     
     print("[Web Researcher] 🔍 Executing internet search...")
-    # 3. Hand the conversation history to the agent
     result = await worker_agent.ainvoke({"messages": state["messages"]})
-    
-    # 4. Extract the final answer and pass it back
     final_answer = result["messages"][-1]
-    
     return {"messages": [final_answer]}
 
 async def file_manager_node(state: AgentState):
-
     print("\n[File Manager] 📂 Booting up MCP Server connection...")
-    
-    # Dynamically get the project directory so MCP knows where to look
     target_directory = os.path.abspath(os.getcwd())
     
-    # Configure the npx Filesystem server
     server_config = {
         "npx": {
-            "transport": "stdio",  # <--- ADD THIS LINE
+            "transport": "stdio",
             "command": "npx",
             "args": ["-y", "@modelcontextprotocol/server-filesystem", target_directory],
         }
     }
     
-    # --- THE FIX IS HERE ---
-    # We no longer use 'async with'. We just initialize the client directly.
     client = MultiServerMCPClient(server_config)
-    
-    # Grab the file-reading tools dynamically
     mcp_tools = await client.get_tools()
     print(f"[File Manager] Successfully loaded {len(mcp_tools)} tools.")
     
-    # Create a specialized worker agent on the fly
     worker_agent = create_react_agent(llm, tools=mcp_tools)
     
     print("[File Manager] 🔍 Executing task...")
-    # Hand the entire conversation history to the worker so it knows what the user asked
     result = await worker_agent.ainvoke({"messages": state["messages"]})
-    
-    # Extract the worker's final answer and pass it back to the graph's shared whiteboard
     final_answer = result["messages"][-1]
-    
     return {"messages": [final_answer]}
+
+# --- THE FIX: STRICT PYDANTIC PYTHON TOOL ---
+# --- THE BULLETPROOF PYDANTIC TOOL ---
+repl = PythonREPL()
+
+class PythonToolInput(BaseModel):
+    # We force the AI to send a list of strings instead of one massive block
+    code_lines: List[str] = Field(description="A list of python code lines to execute. MUST use SINGLE QUOTES ('') for strings inside the code. NEVER use double quotes.")
+
+@tool("python_executor", args_schema=PythonToolInput)
+def execute_python(code_lines: List[str]) -> str:
+    """Executes python code in a REPL environment and returns the stdout."""
+    try:
+        # We manually join the lines back together into a valid Python script
+        script = "\n".join(code_lines)
+        
+        # Print what the AI wrote to the terminal so you can monitor it!
+        print(f"\n--- AI GENERATED SCRIPT ---\n{script}\n---------------------------\n")
+        
+        return repl.run(script)
+    except Exception as e:
+        return f"Code execution failed: {str(e)}"
+# -------------------------------------------
 
 async def data_analyst_node(state: AgentState):
     print("\n[Data Analyst] Processing Mathematical Query/ data request...")
 
     system_prompt ="""You are an expert Autonomous Data Scientist and Financial Analyst.
-        Your primary tool is the PythonREPLTool. You write and execute Python code to analyze data.
+        Your primary tool is 'python_executor'. 
     
         CRITICAL RULES FOR DATA ANALYSIS:
-        1. If the user provides a CSV file path, you MUST use the `pandas` library to load and analyze it.
-        2. Always print the results of your analysis (e.g., `print(df.describe())`) so the terminal output is captured.
+        1. If the user provides a CSV file path, you MUST use `pandas` to load it.
+        2. Always print the results (e.g., `print(df['Revenue'].sum())`) so the terminal captures it.
+        3. Provide your code as a list of strings (one string per line of code).
+        4. ABSOLUTE RULE: You MUST use SINGLE QUOTES ('') for all strings inside your Python code. NEVER use double quotes (").
         
-        CRITICAL RULES FOR ERRORS:
-        1. If your code fails, you will receive the error traceback in the tool output. 
-        2. Do not apologize. Immediately write a corrected Python script and execute it again.
-    
         CRITICAL RULE FOR FINAL OUTPUT:
-        1. After you successfully run your Python code and get the answer, you MUST write a final, conversational text response to the user summarizing the exact numbers or findings. NEVER return an empty response.
+        After your tool successfully runs, write a text response summarizing the exact numbers.
         """
-
-    repl_tool = PythonREPLTool()
 
     worker_agent = create_react_agent(
         llm,
-        tools = [repl_tool],
+        tools = [execute_python], 
         prompt = system_prompt
     )
 
@@ -160,10 +166,8 @@ workflow.add_node("web_researcher", web_researcher_node)
 workflow.add_node("file_manager", file_manager_node)
 workflow.add_node("data_analyst", data_analyst_node)
 
-# The conversation ALWAYS starts with the boss
 workflow.set_entry_point("supervisor")
 
-# The boss decides who goes next based on the structured output
 workflow.add_conditional_edges(
     "supervisor",
     lambda state: state["next"], 
@@ -175,41 +179,28 @@ workflow.add_conditional_edges(
     }
 )
 
-# After a worker finishes, the graph ends
 workflow.add_edge("web_researcher", END)
 workflow.add_edge("file_manager", END)
 workflow.add_edge("data_analyst", END)
-
-# # Create a physical SQLite database file in folder
-# conn = sqlite3.connect("cfo_memory.db",check_same_thread=False)
-# memory = SqliteSaver(conn)
-
-# #Compile the graph WITH the memory checkpointer attached
-# graph = workflow.compile(checkpointer=memory)
 
 # 9. Test the Asynchronous Routing System
 async def main():
     print("\n--- TESTING ASYNC MULTI-AGENT ROUTING ---")
     
-    test_prompt = input("Ask Multi-Agent System.")
+    test_prompt = input("Ask Multi-Agent System: ")
     print(f"User: {test_prompt}")
     
     test_message = HumanMessage(content=test_prompt)
 
     thread_config = {"configurable": {"thread_id": "audit_session_0"}}
     
-    # Async Database connection
     async with AsyncSqliteSaver.from_conn_string("cfo_memory.db") as memory:
         graph = workflow.compile(checkpointer=memory)
-
-        print(f"User: {test_prompt}")
         # Execute the graph
         result = await graph.ainvoke({"messages": [test_message]},config=thread_config)
     
-    # Print the final output from the worker
     print("\n[Final Output]:")
     print(result["messages"][-1].content)
-    
     print("\n[System] Graph execution finished cleanly.")
 
 if __name__ == "__main__":

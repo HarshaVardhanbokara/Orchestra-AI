@@ -12,7 +12,7 @@ load_dotenv()
 async def app():
     print("Initializing Model Context Protocol (MCP) Server...\n")
     
-    gemini_model = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
+    gemini_model = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0)
     
     # Make sure this path points to your actual folder
     # This dynamically grabs the absolute path of the folder you are running the script in
